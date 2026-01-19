@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+playwright
+beautifulsoup4
+lxml
+fake-useragent
+requests
