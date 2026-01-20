@@ -33,7 +33,7 @@ def parse_date(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
 
-    value = value.replace("T", "").strip()
+    value = (value[:-1] if value.endswith("T") else value).strip()
 
     try:
         dt = datetime.strptime(value, "%a, %b %d, %Y")

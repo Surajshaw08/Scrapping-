@@ -14,20 +14,21 @@ HEADERS = {
     "Referer": "https://www.google.com/",
 }
 
-HTML_DIR = Path("html_cache")
-HTML_DIR.mkdir(exist_ok=True)
+# Temporary directory for saving fetched HTML (gitignored)
+HTML_TEMP_DIR = Path("html_temp")
+HTML_TEMP_DIR.mkdir(exist_ok=True)
 
 
 def get_html_file_path(url: str) -> Path:
-    """Get the file path for a given URL"""
+    """Get the file path for a given URL (in html_temp)."""
     external_id = url.rstrip("/").split("/")[-1]
-    return HTML_DIR / f"{external_id}.html"
+    return HTML_TEMP_DIR / f"{external_id}.html"
 
 
 def get_metadata_file_path(url: str) -> Path:
-    """Get the metadata file path for a given URL"""
+    """Get the metadata file path for a given URL (in html_temp)."""
     external_id = url.rstrip("/").split("/")[-1]
-    return HTML_DIR / f"{external_id}.json"
+    return HTML_TEMP_DIR / f"{external_id}.json"
 
 
 def save_html(url: str, html: str, metadata: Optional[dict] = None) -> Path:

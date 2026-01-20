@@ -17,6 +17,94 @@ def get_value_by_label_contains(soup: BeautifulSoup, label: str) -> Optional[str
     return None
 
 
+def get_value_by_label_in_li(soup: BeautifulSoup, label: str, list_class: str = "top-ratios") -> Optional[str]:
+    """
+    Finds value in ul.top-ratios (or similar) where <li> has two <span>s:
+    first contains label, second (or span.text-end) contains value.
+    Used on chittorgarh NCD/IPO detail pages.
+    """
+    ul = soup.find("ul", class_=lambda x: x and list_class in (x if isinstance(x, str) else " ".join(x or [])))
+    if not ul:
+        return None
+    for li in ul.find_all("li"):
+        spans = li.find_all("span")
+        for s in spans:
+            if label.lower() in clean_text(s.get_text()).lower():
+                val_span = li.find("span", class_=lambda x: x and "text-end" in (x if isinstance(x, str) else " ".join(x or [])))
+                if val_span:
+                    return clean_text(val_span.get_text())
+                if len(spans) >= 2:
+                    return clean_text(spans[-1].get_text())
+                return None
+    return None
+
+
+def get_value_from_cards(soup: BeautifulSoup, label: str) -> Optional[str]:
+    """
+    Finds value in card-ipo layout: p.text-muted (label) + p.fs-5 (value).
+    Used for Open Date, Close Date, Issue Size (Overall), Coupon Rate, etc.
+    """
+    for p in soup.find_all("p", class_=lambda c: c and "text-muted" in (c if isinstance(c, str) else " ".join(c or []) or "").lower()):
+        if label.lower() in clean_text(p.get_text()).lower():
+            next_p = p.find_next_sibling("p")
+            if next_p:
+                return clean_text(next_p.get_text())
+            parent = p.parent
+            if parent:
+                fs5 = parent.find("p", class_=lambda c: c and "fs-5" in (c if isinstance(c, str) else " ".join(c or []) or "").lower())
+                if fs5:
+                    return clean_text(fs5.get_text())
+    return None
+
+
+def parse_registrar_info_ul(ul) -> dict:
+    """
+    Parse ul.registrar-info or similar: li with fa-phone, fa-envelope, fa-globe.
+    Returns dict: phone_numbers (list), email, website.
+    Handles comma-separated phone numbers in one li.
+    """
+    out = {"phone_numbers": [], "email": "", "website": ""}
+    if not ul:
+        return out
+    for li in ul.find_all("li"):
+        icon = li.find("i", class_=lambda c: c)
+        icon_c = " ".join(icon.get("class", [])) if icon else ""
+        text = clean_text(li.get_text())
+        link = li.find("a", href=True)
+        if "envelope" in icon_c or "@" in text:
+            out["email"] = text if "@" in text else (link.get("href", "").replace("mailto:", "") if link and "mailto:" in (link.get("href") or "") else out["email"])
+        elif "phone" in icon_c:
+            for part in [p.strip() for p in text.split(",")]:
+                m = re.search(r"[\d\s\+\-\(\)]+", part)
+                if m and len(m.group().strip()) >= 8:
+                    out["phone_numbers"].append(m.group().strip())
+        elif "globe" in icon_c or link:
+            if link:
+                h = link.get("href", "")
+                if h.startswith("http"):
+                    out["website"] = h
+    return out
+
+
+def find_card_by_heading(soup: BeautifulSoup, *headings: str):
+    """
+    Finds a card/section that contains an h2 with any of the given heading texts.
+    Returns the parent element that contains both the h2 and the section content
+    (e.g. div.card or the h2's parent), or None.
+    """
+    for h in soup.find_all(["h2", "h3"], class_=lambda c: True):
+        t = clean_text(h.get_text()).lower()
+        if any(hd.lower() in t for hd in headings):
+            # Prefer parent that has both the header and substantial content (address, ol, ul, table)
+            p = h.parent
+            while p and p.name != "body":
+                if p.find("address") or p.find("ol") or p.find("ul", class_=lambda c: c and "registrar" in (c if isinstance(c, str) else " ".join(c or []))) or p.find("table"):
+                    return p
+                p = p.parent
+            return h.parent
+    return None
+
+
 def get_value_by_label_exact(soup: BeautifulSoup, label: str) -> Optional[str]:
     """
     Finds table value where <td> exactly matches label text

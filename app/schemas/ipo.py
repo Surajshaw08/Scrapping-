@@ -11,14 +11,14 @@ class Objective(BaseModel):
 
 class Financial(BaseModel):
     period_label: str
-    period_end_date: date
-    assets: float
-    total_income: float
-    pat: float
-    ebitda: float
-    net_worth: float
-    reserves: float
-    borrowings: float
+    period_end_date: Optional[date] = None
+    assets: Optional[float] = None
+    total_income: Optional[float] = None
+    pat: Optional[float] = None
+    ebitda: Optional[float] = None
+    net_worth: Optional[float] = None
+    reserves: Optional[float] = None
+    borrowings: Optional[float] = None
 
 class Peer(BaseModel):
     company: str

@@ -124,6 +124,7 @@ dmypy.json
 
 # Project-specific
 html_cache/
+html_temp/
 *.html
 *.json
 !requirements.txt
