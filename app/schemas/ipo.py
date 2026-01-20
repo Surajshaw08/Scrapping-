@@ -42,6 +42,7 @@ class Registrar(BaseModel):
     website: str
 
 class Reservation(BaseModel):
+    # Share counts from "Shares Offered" column (e.g. 21,16,000 -> 2116000); other = percentage
     qib: float
     anchor: float
     ex_anchor: float
@@ -51,8 +52,8 @@ class Reservation(BaseModel):
     retail: float
     employee: float
     shareholder: float
-    other: float
-    total: float
+    other: float  # percentage (e.g. 5.02 for Market Maker)
+    total: float  # total share count (e.g. 44,60,000 -> 4460000)
 
 class FAQ(BaseModel):
     question: str
@@ -133,3 +134,15 @@ class IPO(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# --- BATCH SCRAPE ---
+
+class ScrapeBatchRequest(BaseModel):
+    urls: List[str] = Field(..., min_length=1, description="List of Chittorgarh IPO page URLs to scrape")
+
+
+class ScrapeBatchItem(BaseModel):
+    url: str
+    data: Optional[IPO] = None
+    error: Optional[str] = None

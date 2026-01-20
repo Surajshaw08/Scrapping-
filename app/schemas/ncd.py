@@ -110,3 +110,16 @@ class NCD(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# --- BATCH SCRAPE ---
+
+
+class ScrapeBatchRequest(BaseModel):
+    urls: List[str] = Field(..., min_length=1, description="List of Chittorgarh NCD page URLs to scrape")
+
+
+class ScrapeBatchItem(BaseModel):
+    url: str
+    data: Optional[NCD] = None
+    error: Optional[str] = None

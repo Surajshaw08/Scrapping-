@@ -129,13 +129,80 @@ def _parse_price_band(s: str):
 
 
 def _parse_bse_nse(s: str):
-    """From '544678 / BHARATCOAL' return (bse_code, nse_code)."""
+    """From '544678 / BHARATCOAL' or '544647 / NEPHROPLUS' return (bse_code, nse_code)."""
     if not s:
         return None, None
     parts = [p.strip() for p in re.split(r"\s*/\s*", s)]
-    bse = parts[0] if len(parts) > 0 and parts[0].isdigit() else None
-    nse = parts[1] if len(parts) > 1 else None
+    bse = parts[0] if len(parts) > 0 and parts[0].replace(",", "").isdigit() else None
+    nse = parts[1] if len(parts) > 1 and parts[1] else None
     return (bse, nse)
+
+
+def _extract_bse_nse_from_script(soup: BeautifulSoup):
+    """Try to get bseCode, nseCode from script/JSON (Next.js, React). Returns (bse, nse) or (None, None)."""
+    bse, nse = None, None
+    for script in soup.find_all("script", type=lambda t: t and "json" in (t or "")):
+        txt = script.string or ""
+        if "bseCode" in txt or "nseCode" in txt:
+            m = re.search(r'["\']?bseCode["\']?\s*:\s*["\']?(\d+)["\']?', txt)
+            if m:
+                bse = m.group(1)
+            m = re.search(r'["\']?nseCode["\']?\s*:\s*["\']?([A-Za-z0-9]+)["\']?', txt)
+            if m:
+                nse = m.group(1)
+            if bse or nse:
+                return (bse, nse)
+    return (None, None)
+
+
+def _extract_bse_nse_from_tables(soup: BeautifulSoup):
+    """Fallback: find tr with 'BSE Script' or 'Script Code' and 'NSE' in first cell, parse second cell. Skip 'processing fees' rows."""
+    for tbl in soup.find_all("table"):
+        for tr in tbl.find_all("tr"):
+            cells = tr.find_all("td")
+            if len(cells) < 2:
+                continue
+            first = clean_text(cells[0].get_text()).lower()
+            if "processing" in first or "fees" in first:
+                continue
+            if ("bse script" in first or "script code" in first) and "nse" in first:
+                raw = clean_text(cells[1].get_text())
+                if raw and "/" in raw:
+                    return _parse_bse_nse(raw)
+    return (None, None)
+
+
+def _extract_listing_price(soup: BeautifulSoup):
+    """From 'Listing Day Trading Information' table: Last Trade (preferred) or Open. Uses first numeric column (BSE/NSE)."""
+    section = find_card_by_heading(soup, "Listing Day Trading Information", "Listing Day Trading")
+    if not section:
+        return None
+    tbl = section.find("table")
+    if not tbl:
+        return None
+    for row_label in ("last trade", "open"):
+        for tr in tbl.find_all("tr"):
+            cells = tr.find_all("td")
+            if len(cells) < 2:
+                continue
+            if row_label not in clean_text(cells[0].get_text()).lower():
+                continue
+            for c in cells[1:]:
+                v = parse_float(clean_text(c.get_text()))
+                if v is not None and v > 0:
+                    return v
+    return None
+
+
+def _extract_rating_from_ldjson(soup: BeautifulSoup):
+    """From script type=application/ld+json (Review schema): reviewRating.ratingValue."""
+    for script in soup.find_all("script", type=lambda t: t and "ld+json" in (t or "")):
+        txt = script.string or ""
+        if "reviewRating" in txt or "ratingValue" in txt:
+            m = re.search(r'"ratingValue"\s*:\s*(\d+(?:\.\d+)?)', txt)
+            if m:
+                return parse_float(m.group(1))
+    return None
 
 
 def _extract_lot_size_table(soup: BeautifulSoup) -> dict:
@@ -230,14 +297,27 @@ def _scrape_ipo_from_soup(soup: BeautifulSoup, url: str) -> dict:
         p = parse_float(ip) if ip else None
         issue_price_low = issue_price_high = p
 
-    # BSE / NSE from combined cell (e.g. "544678 / BHARATCOAL")
+    # BSE / NSE: table (BSE Script Code / NSE Symbol), then script/JSON, then table-scan fallback
     bse_nse_raw = (
         _get_ipo_value(soup, "BSE Script Code")
         or _get_ipo_value(soup, "NSE Symbol")
         or _get_ipo_value(soup, "BSE Script")
+        or get_value_by_label_contains(soup, "BSE Script Code")
         or get_value_by_label_contains(soup, "BSE Script")
     )
     bse_code, nse_code = _parse_bse_nse(bse_nse_raw) if bse_nse_raw else (None, None)
+    if not bse_code or not nse_code:
+        sb, sn = _extract_bse_nse_from_script(soup)
+        if sb:
+            bse_code = bse_code or sb
+        if sn:
+            nse_code = nse_code or sn
+    if not bse_code or not nse_code:
+        tb, tn = _extract_bse_nse_from_tables(soup)
+        if tb:
+            bse_code = bse_code or tb
+        if tn:
+            nse_code = nse_code or tn
     if not bse_code:
         bse_code = _get_ipo_value(soup, "BSE Code")
     if not nse_code:
@@ -326,9 +406,10 @@ def _scrape_ipo_from_soup(soup: BeautifulSoup, url: str) -> dict:
         "anchor_list_url": doc_urls.get("anchor") or extract_link_by_text(soup, "Anchor Investor Link") or extract_link_by_text(soup, "Anchor"),
         "logo_url": logo_url or extract_text_by_selector(soup, "img.logo, .company-logo img", "src"),
 
-        "isTentative": "Tentative" in name or "Tentative" in status,
-        "rating": parse_float(_get_ipo_value(soup, "Rating") or _get_ipo_value(soup, "IPO Rating")),
-        "listing_price": parse_float(_get_ipo_value(soup, "Listing Price") or _get_ipo_value(soup, "Listing Price (Rs)")),
+        "isTentative": (("Tentative" in name or "Tentative" in status) and
+                        not bool(find_card_by_heading(soup, "Listing Day Trading Information", "Listing Day Trading"))),
+        "rating": parse_float(_get_ipo_value(soup, "Rating") or _get_ipo_value(soup, "IPO Rating")) or _extract_rating_from_ldjson(soup),
+        "listing_price": parse_float(_get_ipo_value(soup, "Listing Price") or _get_ipo_value(soup, "Listing Price (Rs)")) or _extract_listing_price(soup),
 
         "faqs": extract_faqs(soup),
     }
@@ -501,23 +582,34 @@ def _extract_services(soup: BeautifulSoup) -> list:
 
 
 def _extract_promoters(soup: BeautifulSoup) -> list:
-    """Extract promoters: 'X and Y are the company promoters' in KPI/div, or section by heading, or table."""
+    """Extract promoters from div.mb-2.px-2 after KPI table ('X, Y and Z are the Promoters of the Company') or 'are the company promoters', or section by heading. Excludes 'Promoter Holding' percentage from table."""
     promoters = []
-    # Method 1: "X and Y are the company promoters" (common in KPI card; use only compact elements)
+    # Match: "X, Y and Z are the company promoters" or "X, Y and Z are the Promoters of the Company"
+    re_prom = re.compile(
+        r"(.+?)\s+are\s+the\s+(?:company\s+)?[Pp]romoters?(?:\s+of\s+the\s+[Cc]ompany)?\.?\s*$",
+        re.I | re.S,
+    )
     skip = {"rs.", "lakh", "mines", "product", "operations", "square kilometre", "tonnes", "ipo ", "apply", "investor"}
+
+    # Method 1: div.mb-2.px-2 after KPI table, or any div/p/td with "are the ... Promoters of the Company" or "are the company promoters"
     for tag in soup.find_all(["div", "p", "td"]):
         t = clean_text(tag.get_text())
-        if "are the company promoter" not in t.lower() or len(t) > 500:
+        if len(t) > 500:
             continue
-        m = re.search(r"(.+?)\s+are the company promoters?\.?", t, re.I | re.S)
+        if "are the company promoter" not in t.lower() and "are the promoters of the company" not in t.lower():
+            continue
+        m = re_prom.search(t)
         if m:
             rest = clean_text(m.group(1))
             if len(rest) > 400:
                 continue
-            parts = [clean_text(p) for p in re.split(r"\s+and\s+", rest) if clean_text(p)]
-            if not parts or any(any(s in (p or "").lower() for s in skip) or len(p or "") > 120 for p in parts):
+            parts = [clean_text(p) for p in re.split(r",\s*|\s+and\s+", rest) if clean_text(p)]
+            if not parts or any(any(s in (p or "").lower() for s in skip) for p in parts):
+                continue
+            if any(len(p or "") > 120 for p in parts):
                 continue
             return parts
+
     # Method 2: find_card_by_heading or section
     section = find_card_by_heading(soup, "Company Promoter", "Promoters", "Promoter") or \
               extract_section_by_heading(soup, "Promoters") or \
@@ -528,28 +620,39 @@ def _extract_promoters(soup: BeautifulSoup) -> list:
         if not promoters:
             for p in section.find_all("p"):
                 t = clean_text(p.get_text())
-                if t and "are the company promoter" in t.lower():
-                    m = re.search(r"(.+?)\s+are the company promoters?\.?", t, re.I | re.S)
+                if t and re_prom.search(t):
+                    m = re_prom.search(t)
                     if m:
-                        for part in re.split(r"\s+and\s+", clean_text(m.group(1))):
+                        for part in re.split(r",\s*|\s+and\s+", clean_text(m.group(1))):
                             x = clean_text(part)
                             if x and len(x) > 2:
                                 promoters.append(x)
                         return promoters
-                elif t and len(t) > 5 and len(t) < 300:
+                elif t and len(t) > 5 and len(t) < 300 and "%" not in t:
                     promoters.append(t)
         if not promoters:
             for div in section.find_all("div"):
                 t = clean_text(div.get_text())
-                if t and 10 < len(t) < 200:
-                    promoters.append(t)
-    # Method 3: table label "Promoters"
+                if t and 10 < len(t) < 200 and "are the" in t.lower() and "%" not in t:
+                    m = re_prom.search(t)
+                    if m:
+                        for part in re.split(r",\s*|\s+and\s+", clean_text(m.group(1))):
+                            x = clean_text(part)
+                            if x and len(x) > 2:
+                                promoters.append(x)
+                        return promoters
+    # Method 3: table row labeled "Promoters" (not "Promoter Holding" which has %). Reject percentage values.
     if not promoters:
-        pt = get_value_by_label_contains(soup, "Promoter")
+        pt = get_value_by_label_contains(soup, "Promoters")
+        if not pt:
+            pt = get_value_by_label_contains(soup, "Promoter")
+        if pt:
+            if re.match(r"^\s*[\d.,]+\s*%?\s*$", (pt or "").strip()) or "%" in (pt or "").strip():
+                pt = None
         if pt:
             for x in re.split(r"[,;]\s*|\s+and\s+", pt):
                 p = clean_text(x)
-                if p:
+                if p and "%" not in p:
                     promoters.append(p)
     return promoters
 
@@ -770,8 +873,9 @@ def _extract_registrar(soup: BeautifulSoup) -> Optional[dict]:
 
 
 def _extract_reservations(soup: BeautifulSoup) -> list:
-    """Extract from IPO Reservation table: parse (X.XX%) from Shares Offered and map to qib, anchor, ex_anchor, nii, bnii, snii, retail, employee, shareholder, total."""
-    r = {k: None for k in ["qib", "anchor", "ex_anchor", "nii", "bnii", "snii", "retail", "employee", "shareholder", "other", "total"]}
+    """Extract from IPO Reservation table: Shares Offered column '21,16,000 (47.44%)' -> share count (2116000) for qib/anchor/.../retail/employee/shareholder/total; for 'other' (Market Maker) use percentage (5.02)."""
+    KEYS = ["qib", "anchor", "ex_anchor", "nii", "bnii", "snii", "retail", "employee", "shareholder", "other", "total"]
+    r = {k: None for k in KEYS}
     card = find_card_by_heading(soup, "IPO Reservation", "Reservation")
     if not card:
         return []
@@ -783,30 +887,45 @@ def _extract_reservations(soup: BeautifulSoup) -> list:
         if len(cells) < 2:
             continue
         label = clean_text(cells[0].get_text()).lower()
-        val = clean_text(cells[1].get_text())
-        pct = re.search(r"(\d+\.?\d*)\s*%", val)
-        p = float(pct.group(1)) if pct else None
-        if "qib" in label and "anchor" not in label and "ex" not in label:
-            r["qib"] = p
+        val = clean_text(cells[1].get_text())  # e.g. "21,16,000 (47.44%)"
+        # Shares: "21,16,000" before "("
+        shares_m = re.search(r"^([\d,]+)\s*\(", val)
+        shares = int(shares_m.group(1).replace(",", "")) if shares_m and shares_m.group(1).replace(",", "").isdigit() else 0
+        pct_m = re.search(r"\(?\s*(\d+\.?\d*)\s*%", val)
+        pct = float(pct_m.group(1)) if pct_m else None
+        if pct is None and shares == 0:
+            continue
+        key = None
+        use_pct = False  # True for "other" only
+        if "total" in label and "shares" in label:
+            key = "total"
+        elif "qib" in label and "anchor" not in label and "ex" not in label:
+            key = "qib"
         elif "anchor" in label and "ex" not in label:
-            r["anchor"] = p
+            key = "anchor"
         elif "ex" in label and "anchor" in label:
-            r["ex_anchor"] = p
+            key = "ex_anchor"
         elif "bnii" in label or "b-nii" in label:
-            r["bnii"] = p
+            key = "bnii"
         elif "snii" in label or "s-nii" in label:
-            r["snii"] = p
+            key = "snii"
         elif "nii" in label or "hni" in label:
-            r["nii"] = p
+            key = "nii"
         elif "retail" in label:
-            r["retail"] = p
+            key = "retail"
         elif "employee" in label:
-            r["employee"] = p
+            key = "employee"
         elif "shareholder" in label:
-            r["shareholder"] = p
-        elif "total" in label:
-            r["total"] = p
-    return [{k: (v or 0) for k, v in r.items()}]
+            key = "shareholder"
+        elif "market maker" in label:
+            key = "other"
+            use_pct = True
+        elif "other" in label and r["other"] is None:
+            key = "other"
+            use_pct = True
+        if key:
+            r[key] = float(pct) if use_pct and pct is not None else (shares if shares > 0 else 0)
+    return [{k: (v if v is not None else 0) for k, v in r.items()}]
 
 
 def _extract_date(soup: BeautifulSoup, labels: list):
